@@ -1,0 +1,1547 @@
+---
+title: "ofo Marketing Dashboard (US)"
+resource_files:
+- data/trip_data.RData
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    theme: bootstrap
+---
+
+```{r setup, include=FALSE}
+library(shiny)
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(leaflet)
+library(leaflet.extras)
+library(ggplot2)
+library(plotly)
+library(scales)
+#library(ofobikeR)
+library(here)
+library(rlang)
+library(leaflet)
+library(leaflet.extras)
+
+ofo_color_palette <- function(palette_type,num_colors=1) {
+  ofo.primary.color <- "#FCEE7E"
+  ofo.colors.gradient <- c("#FCEE7E","#FDE935","#FCD908","#F2BA14")
+  ofo.colors.qualitative <- c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A","#9D8850","#9CA09F","#181A19")
+
+  #create a color palette from ofo gradient yellow
+
+  if (palette_type==1)
+  {
+    my.palette <- ofo.primary.color
+    my.palette
+  }
+  else if (palette_type==2)
+  {
+    colfunc <- colorRampPalette(c(ofo.colors.gradient[1],ofo.colors.gradient[length(ofo.colors.gradient)]))
+    my.palette <- colfunc(num_colors)
+    my.palette
+  }
+  else
+  {
+    my.palette=ofo.colors.qualitative[1:num_colors]
+    my.palette
+  }
+
+}
+
+
+ofo_fte_theme <- function() {
+  # from http://minimaxir.com/2015/02/ggplot-tutorial/
+
+  #import our base fonts
+  #need to figure out a better way to do font_import if on a new machine
+  #font_import()
+  #sysfonts::font_add_google(name = "Montserrat", family = "Montserrat")
+
+  # Generate the colors for the chart procedurally with RColorBrewer
+  palette <- RColorBrewer::brewer.pal("Greys", n=9)
+  color.background = palette[2]
+  color.grid.major = palette[3]
+  color.axis.text = palette[6]
+  color.axis.title = palette[7]
+  color.title = palette[9]
+
+  # Begin construction of chart
+  theme_bw(base_size=7,base_family = "Montserrat") +
+
+    # Set the entire chart region to a light gray color
+    theme(panel.background=element_rect(fill=color.background, color=color.background)) +
+    theme(plot.background=element_rect(fill=color.background, color=color.background)) +
+    theme(panel.border=element_rect(color=color.background)) +
+
+    # Format the grid
+    #    theme(panel.grid.major=element_line(color=color.grid.major,size=.25)) +
+    theme(panel.grid.major.x = element_blank() ,
+          # explicitly set the horizontal lines (or they will disappear too)
+          panel.grid.major.y = element_line( size=.1, color="black" )) +
+    theme(panel.grid.minor=element_blank()) +
+    theme(axis.ticks=element_blank()) +
+
+    # Format the legend, but hide by default
+    theme(legend.position="none") +
+    theme(legend.background = element_rect(fill=color.background)) +
+    theme(legend.text = element_text(size=7,color=color.axis.title)) +
+
+    # Set title and axis labels, and format these and tick marks
+    theme(plot.title=element_text(color=color.title, size=12, vjust=1.25,hjust = 0.5)) +
+    theme(plot.subtitle=element_text(color=color.title, size=10, vjust=1.25,hjust = 0.5)) +
+    theme(axis.text.x=element_text(size=7,color=color.axis.text)) +
+    theme(axis.text.y=element_text(size=7,color=color.axis.text)) +
+    theme(axis.title.x=element_text(size=8,color=color.axis.title, vjust=0)) +
+    theme(axis.title.y=element_text(size=8,color=color.axis.title, vjust=1.25)) +
+    theme(strip.text = element_text(size=10)) +
+    # Plot margins
+    theme(plot.margin = unit(c(0.35, 0.2, 0.3, 0.35), "cm"))
+}
+
+#if we have already loaded and formatted our data, skip to load the binary
+#load(here('data','marketing_dashboard_data.RData'))
+
+load('app_data/marketing_dashboard_data.RData')
+
+computeLastUpdate<-function() {
+  
+  return(max(US_trips_cleaned$trip_time))
+}
+
+getToplineValues<-function(my_measure,my_timeframe) {
+  toplineMeasure<-Topline_dashboard %>% 
+    filter(dashboard_Measure==my_measure,TimeFrame==my_timeframe) %>% 
+    summarise(sum(dashboard_Value))
+
+ return(toplineMeasure) 
+}
+ 
+updatedUserData <- reactive({
+  user_data <-US_Users_Summary_Clean %>% 
+    filter(lubridate::year(download_date)==2018) %>% 
+    filter(grepl(input$citiesConversion,Market)) %>% 
+    select(join_date,start_week,start_month,start_year,first_trip,starts_with("has_")) %>%
+    rename(week_start=start_week,
+           month_start=start_month,
+           year_start=start_year,
+           day_start=join_date) %>% 
+    mutate(same_day_conversion=ifelse(first_trip-day_start==0,1,0),
+           three_day_conversion=ifelse(first_trip-day_start<=3,1,0)) %>%
+   group_by(!!rlang::sym(input$timedimensionConversion))%>%
+#     group_by(week_start)%>%
+       summarise(downloads=n(),
+            registrations=sum(has_registered),
+            first_trip=sum(has_trip),
+            multiple_trips=sum(has_multiple_trips),
+            same_day_conversion=sum(same_day_conversion,na.rm=TRUE),
+            three_day_conversion=sum(three_day_conversion,na.rm=TRUE)) %>% 
+  mutate(overall_conversion=registrations/downloads,
+         ride_conversion=first_trip/registrations,
+         same_day_conversion=same_day_conversion/registrations,
+         three_day_conversion=three_day_conversion/registrations) %>%
+  rename(time_dimension=!!rlang::sym(input$timedimensionConversion))
+  
+  return(user_data)
+})
+
+downloadUserData <- reactive({
+  user_data <-US_Users_Summary_Clean %>% 
+    filter(lubridate::year(download_date)==2018) %>% 
+#    filter(grepl(input$citiesConversion,Market)) %>% 
+    select(join_date,start_week,start_month,start_year,Market,first_trip,starts_with("has_")) %>%
+    rename(week_start=start_week,
+           month_start=start_month,
+           year_start=start_year,
+           day_start=join_date) %>% 
+    mutate(same_day_conversion=ifelse(first_trip-day_start==0,1,0),
+           three_day_conversion=ifelse(first_trip-day_start<=3,1,0)) %>%
+   group_by(Market,!!rlang::sym(input$timedimensionConversion))%>%
+#     group_by(week_start)%>%
+       summarise(downloads=n(),
+            registrations=sum(has_registered),
+            first_trip=sum(has_trip),
+            multiple_trips=sum(has_multiple_trips),
+            same_day_conversion=sum(same_day_conversion,na.rm=TRUE),
+            three_day_conversion=sum(three_day_conversion,na.rm=TRUE)) %>% 
+  mutate(overall_conversion=registrations/downloads,
+         ride_conversion=first_trip/registrations,
+         same_day_conversion=same_day_conversion/registrations,
+         three_day_conversion=three_day_conversion/registrations) %>%
+  rename(time_dimension=!!rlang::sym(input$timedimensionConversion))
+  
+  return(user_data)
+})
+
+updateRetentionData<- reactive({
+  
+  my_time_dimension<-ifelse(input$timedimensionRetention=='month_start','months_since_first','weeks_since_first')
+  
+  retention_data <- US_Users_Summary_Clean %>% 
+  filter(has_registered==1,
+         download_date>=as.Date('2018-01-01')) %>% 
+  filter(grepl(input$citiesRetention,Market)) %>% 
+select(user_id,download_date,join_date,start_week,start_month,start_year) %>% 
+    rename(week_start=start_week,
+           month_start=start_month,
+           year_start=start_year) %>% 
+  left_join(.,US_trips_cleaned,by='user_id') %>% 
+  mutate(weeks_since_first=difftime(trip_week,week_start,units="week"),
+         months_since_first=lubridate::month(trip_month)-lubridate::month(month_start)) %>% 
+  group_by(!!rlang::sym(input$timedimensionRetention))%>%
+  mutate(total_users=n_distinct(user_id)) %>% 
+  filter(!!rlang::sym(my_time_dimension)>=0) %>% 
+  group_by(!!rlang::sym(input$timedimensionRetention),!!rlang::sym(my_time_dimension)) %>% 
+  summarise(riders=n_distinct(user_id),
+            users=min(total_users),
+            cohort_conversion=riders/users) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionRetention),
+         my_x_axis=!!rlang::sym(my_time_dimension))
+  
+  return(retention_data)
+  })
+
+downloadRetentionData<- reactive({
+  
+  my_time_dimension<-ifelse(input$timedimensionRetention=='month_start','months_since_first','weeks_since_first')
+  
+  retention_data <- US_Users_Summary_Clean %>% 
+  filter(has_registered==1,
+         download_date>=as.Date('2018-01-01')) %>% 
+#  filter(grepl(input$citiesRetention,Market)) %>% 
+select(user_id,download_date,join_date,Market,start_week,start_month,start_year) %>% 
+    rename(week_start=start_week,
+         month_start=start_month,
+         year_start=start_year,
+         User_Market=Market) %>% 
+  left_join(.,US_trips_cleaned,by='user_id') %>% 
+  mutate(weeks_since_first=difftime(trip_week,week_start,units="week"),
+         months_since_first=lubridate::month(trip_month)-lubridate::month(month_start)) %>% 
+  group_by(User_Market,!!rlang::sym(input$timedimensionRetention))%>%
+  mutate(total_users=n_distinct(user_id)) %>% 
+  filter(!!rlang::sym(my_time_dimension)>=0) %>% 
+  group_by(User_Market,!!rlang::sym(input$timedimensionRetention),!!rlang::sym(my_time_dimension)) %>% 
+  summarise(riders=n_distinct(user_id),
+            users=min(total_users),
+            cohort_conversion=riders/users) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionRetention),
+         my_x_axis=!!rlang::sym(my_time_dimension))
+  
+  return(retention_data)
+  })
+
+updateRetentionTripsData<- reactive({
+  
+  retention_trips_data <- US_Users_Summary_Clean %>% 
+  filter(has_registered==1,
+         download_date>=as.Date('2018-01-01')) %>%
+  filter(grepl(input$citiesRetention,Market)) %>%   
+  select(user_id,download_date,start_week,start_month,start_year) %>% 
+  rename(week_start=start_week,
+         month_start=start_month,
+         year_start=start_year) %>% 
+  left_join(.,US_trips_cleaned,by='user_id') %>% 
+  group_by(user_id) %>% 
+  mutate(total_trips=n_distinct(order_id)) %>% 
+  group_by(!!rlang::sym(input$timedimensionRetention),total_trips)%>%
+  summarise(riders=n_distinct(user_id)) %>% 
+  mutate(total_riders=sum(riders),
+         percent_riders=riders/total_riders) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionRetention))  
+    
+
+  return(retention_trips_data)
+  })
+
+downloadRetentionTripsData<- reactive({
+  
+  retention_trips_data <- US_Users_Summary_Clean %>% 
+  filter(has_registered==1,
+         download_date>=as.Date('2018-01-01')) %>%
+#  filter(grepl(input$citiesRetention,Market)) %>%   
+  select(user_id,download_date,Market,start_week,start_month,start_year) %>% 
+  rename(week_start=start_week,
+         month_start=start_month,
+         year_start=start_year,
+         User_Market=Market) %>% 
+  left_join(.,US_trips_cleaned,by='user_id') %>% 
+  group_by(user_id) %>% 
+  mutate(total_trips=n_distinct(order_id)) %>% 
+  group_by(User_Market,!!rlang::sym(input$timedimensionRetention),total_trips)%>%
+  summarise(riders=n_distinct(user_id)) %>% 
+  mutate(total_riders=sum(riders),
+         percent_riders=riders/total_riders) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionRetention))  
+    
+
+  return(retention_trips_data)
+  })
+
+updateActiveUserData <- reactive({
+      trip_data<-US_trips_cleaned %>% 
+        filter(grepl(input$citiesUsage,Market)) %>% 
+        group_by(!!rlang::sym(input$timedimensionUsage)) %>% 
+        mutate(total_trips=n()) %>% 
+        group_by(!!rlang::sym(input$timedimensionUsage),trip_payment_type) %>%
+        summarise(trips=n(),
+                  users=n_distinct(user_id),
+                  total_trips=min(total_trips),
+                  trip_share=trips/total_trips) %>% 
+      rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+      
+      
+uniq_users<-US_trips_cleaned %>% 
+  filter(grepl(input$citiesUsage,Market)) %>% 
+  group_by(!!rlang::sym(input$timedimensionUsage)) %>% 
+  summarise(active_users=n_distinct(user_id)) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+  
+
+total_users<-US_Users_Summary_Clean %>%
+  filter(grepl(input$citiesUsage,Market) & has_registered==1) %>% 
+   rename(trip_week=start_week,
+         trip_month=start_month,
+         trip_year=start_year) %>% 
+  group_by(!!rlang::sym(input$timedimensionUsage)) %>% 
+  summarise(users=n()) %>% 
+  mutate(total_users=cumsum(users)) %>% 
+  select(!!rlang::sym(input$timedimensionUsage),total_users) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+
+
+active_user_data<-inner_join(uniq_users,total_users,by="time_dimension") %>% 
+  mutate(inactive_users=total_users-active_users) %>% 
+  select(time_dimension,active_users,inactive_users) %>% 
+  gather(segment,users,active_users:inactive_users) %>% 
+  arrange(desc(segment)) %>% 
+  mutate(segment=factor(segment,unique(segment)))
+
+ return(active_user_data)
+    })
+
+downloadActiveUserData <- reactive({
+      trip_data<-US_trips_cleaned %>% 
+#        filter(grepl(input$citiesUsage,Market)) %>% 
+        group_by(Market, !!rlang::sym(input$timedimensionUsage)) %>% 
+        mutate(total_trips=n()) %>% 
+        group_by(Market, !!rlang::sym(input$timedimensionUsage),trip_payment_type) %>%
+        summarise(trips=n(),
+                  users=n_distinct(user_id),
+                  total_trips=min(total_trips),
+                  trip_share=trips/total_trips) %>% 
+      rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+      
+      
+uniq_users<-US_trips_cleaned %>% 
+#  filter(grepl(input$citiesUsage,Market)) %>% 
+  group_by(Market, !!rlang::sym(input$timedimensionUsage)) %>% 
+  summarise(active_users=n_distinct(user_id)) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+  
+
+total_users<-US_Users_Summary_Clean %>%
+#  filter(grepl(input$citiesUsage,Market) & has_registered==1) %>% 
+   filter(has_registered==1) %>% 
+    rename(trip_week=start_week,
+         trip_month=start_month,
+         trip_year=start_year) %>% 
+  group_by(Market, !!rlang::sym(input$timedimensionUsage)) %>% 
+  summarise(users=n()) %>% 
+  mutate(total_users=cumsum(users)) %>% 
+  select(Market, !!rlang::sym(input$timedimensionUsage),total_users) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+
+
+active_user_data<-inner_join(uniq_users,total_users,by=c("time_dimension","Market")) %>% 
+  mutate(inactive_users=total_users-active_users) %>% 
+  select(time_dimension,active_users,inactive_users) %>% 
+  gather(segment,users,active_users:inactive_users) %>% 
+  arrange(desc(segment)) %>% 
+  mutate(segment=factor(segment,unique(segment)))
+
+ return(active_user_data)
+    })
+
+updateTripData <- reactive({
+      trip_data<-US_trips_cleaned %>% 
+        filter(grepl(input$citiesUsage,Market)) %>% 
+        group_by(!!rlang::sym(input$timedimensionUsage)) %>% 
+        mutate(total_trips=n()) %>% 
+        group_by(!!rlang::sym(input$timedimensionUsage),trip_payment_type) %>%
+        summarise(trips=n(),
+                  users=n_distinct(user_id),
+                  total_trips=min(total_trips),
+                  trip_share=trips/total_trips) %>% 
+      rename(time_dimension=!!rlang::sym(input$timedimensionUsage)) %>% 
+          arrange(desc(total_trips)) %>% 
+  mutate(trip_payment_type=factor(trip_payment_type,levels=c("not captured","Free","ofo Pass","Pay")))
+
+     return(trip_data)
+    })
+
+downloadTripData <- reactive({
+      trip_data<-US_trips_cleaned %>% 
+#        filter(grepl(input$citiesUsage,Market)) %>% 
+        group_by(Market,!!rlang::sym(input$timedimensionUsage)) %>% 
+        mutate(total_trips=n()) %>% 
+        group_by(Market,!!rlang::sym(input$timedimensionUsage),trip_payment_type) %>%
+        summarise(trips=n(),
+                  users=n_distinct(user_id),
+                  total_trips=min(total_trips),
+                  trip_share=trips/total_trips) %>% 
+      rename(time_dimension=!!rlang::sym(input$timedimensionUsage)) %>% 
+          arrange(desc(total_trips)) %>% 
+  mutate(trip_payment_type=factor(trip_payment_type,levels=c("not captured","Free","ofo Pass","Pay")))
+
+     return(trip_data)
+    })
+
+updateTripRecencyData <- reactive({
+      trip_data<-US_trips_cleaned %>% 
+        mutate(trip_type= case_when(
+          time_since_join<=7 ~ 'New User',
+          time_since_last_trip<=28 ~ 'Returning User',
+          time_since_last_trip>28 ~ 'Lapsed User',
+          time_since_join>7 ~ 'First Time User',
+          TRUE ~ 'Other')) %>%
+        filter(grepl(input$citiesUsage,Market)) %>%
+        group_by(!!rlang::sym(input$timedimensionUsage),user_id) %>%
+        arrange(trip_time) %>% 
+        summarise(trip_type=first(trip_type),
+                  trips=n()) %>%
+        group_by(!!rlang::sym(input$timedimensionUsage),trip_type) %>% 
+               summarise(trips=sum(trips)) %>% 
+        rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+     return(trip_data)
+    })
+
+downloadTripRecencyData <- reactive({
+      trip_data<-US_trips_cleaned %>% 
+        mutate(trip_type= case_when(
+          time_since_join<=7 ~ 'New User',
+          time_since_last_trip<=28 ~ 'Returning User',
+          time_since_last_trip>28 ~ 'Lapsed User',
+          time_since_join>7 ~ 'First Time User',
+          TRUE ~ 'Other')) %>%
+#        filter(grepl(input$citiesUsage,Market)) %>%
+        group_by(Market,!!rlang::sym(input$timedimensionUsage),user_id) %>%
+        arrange(trip_time) %>% 
+        summarise(trip_type=first(trip_type),
+                  trips=n()) %>%
+        group_by(Market,!!rlang::sym(input$timedimensionUsage),trip_type) %>% 
+               summarise(trips=sum(trips)) %>% 
+        rename(time_dimension=!!rlang::sym(input$timedimensionUsage))
+     return(trip_data)
+    })
+
+updateRevenueData <- reactive({
+      revenue_data<-US_trips_cleaned %>% 
+        filter(grepl(input$citiesRevenue,Market)) %>% 
+        group_by(!!rlang::sym(input$timedimensionRevenue)) %>% 
+        summarise(cost=sum(price,na.rm=TRUE),
+            coupons=sum(coupon_amount,na.rm=TRUE),
+            ofo_pass=sum(price[trip_payment_type=="ofo Pass"],na.rm=TRUE),
+            free=sum(price[trip_payment_type=="Free"],na.rm=TRUE),
+            collected=sum(balance,na.rm=TRUE)+sum(credit_balance,na.rm=TRUE)+sum(receipts,na.rm=TRUE)) %>% 
+        rename(time_dimension=!!rlang::sym(input$timedimensionRevenue)) %>%
+        select(time_dimension,coupons,ofo_pass,free,collected) %>% 
+        gather(payment_type,revenue,coupons:collected)
+
+     return(revenue_data)
+    })
+
+downloadRevenueData <- reactive({
+      revenue_data<-US_trips_cleaned %>% 
+#        filter(grepl(input$citiesRevenue,Market)) %>% 
+        group_by(Market,!!rlang::sym(input$timedimensionRevenue)) %>% 
+        summarise(cost=sum(price,na.rm=TRUE),
+            coupons=sum(coupon_amount,na.rm=TRUE),
+            ofo_pass=sum(price[trip_payment_type=="ofo Pass"],na.rm=TRUE),
+            free=sum(price[trip_payment_type=="Free"],na.rm=TRUE),
+            collected=sum(balance,na.rm=TRUE)+sum(credit_balance,na.rm=TRUE)+sum(receipts,na.rm=TRUE)) %>% 
+        rename(time_dimension=!!rlang::sym(input$timedimensionRevenue)) %>%
+        select(Market,time_dimension,coupons,ofo_pass,free,collected)
+
+     return(revenue_data)
+    })
+
+updateCouponData <- reactive({
+coupon_usage <-US_trips_cleaned %>% 
+  mutate(trip_type= case_when(
+    time_since_join<=7 ~ 'New User',
+    time_since_last_trip<=28 ~ 'Returning User',
+    time_since_last_trip>28 ~ 'Lapsed User',
+    time_since_join>7 ~ 'First Time User',
+    TRUE ~ 'Other')) %>%
+  filter(coupon_name!='NULL' & grepl(input$citiesRevenue,Market)) %>% 
+  group_by(!!rlang::sym(input$timedimensionRevenue),coupon_name,trip_type) %>% 
+  summarise(coupons_used=n(),
+            unique_users=n_distinct(user_id)) %>% 
+  group_by(!!rlang::sym(input$timedimensionRevenue),coupon_name) %>% 
+  mutate(total_coupons=sum(coupons_used)) %>% 
+  ungroup(.) %>% 
+  filter(!!rlang::sym(input$timedimensionRevenue)==max(!!rlang::sym(input$timedimensionRevenue))) %>% 
+  arrange(total_coupons) %>% 
+  mutate(coupon_name=factor(coupon_name,unique(coupon_name)))
+  
+return(coupon_usage)
+    })
+
+downloadCouponData <- reactive({
+coupon_usage <-US_trips_cleaned %>% 
+  mutate(trip_type= case_when(
+    time_since_join<=7 ~ 'New User',
+    time_since_last_trip<=28 ~ 'Returning User',
+    time_since_last_trip>28 ~ 'Lapsed User',
+    time_since_join>7 ~ 'First Time User',
+    TRUE ~ 'Other')) %>%
+  filter(coupon_name!='NULL') %>% 
+  group_by(Market,!!rlang::sym(input$timedimensionRevenue),coupon_name,trip_type) %>% 
+  summarise(coupons_used=n(),
+            unique_users=n_distinct(user_id)) %>% 
+  group_by(Market,!!rlang::sym(input$timedimensionRevenue),coupon_name) %>% 
+  mutate(total_coupons=sum(coupons_used)) %>% 
+  ungroup(.) %>% 
+  filter(!!rlang::sym(input$timedimensionRevenue)==max(!!rlang::sym(input$timedimensionRevenue))) %>% 
+  arrange(total_coupons) %>% 
+  mutate(coupon_name=factor(coupon_name,unique(coupon_name)))
+  
+return(coupon_usage)
+    })
+
+updateOfoPassData <- reactive({
+      ofoPass_data<-ofo_Pass_Clean %>% 
+        filter(grepl(input$citiesOfoPass,Market)) %>% 
+        group_by(user_id, user_city,pass_type,auto_renew) %>% 
+        summarise(passes=n_distinct(create_time),
+            current_status=max(autorenew_status,na.rm=TRUE),
+            day_start=min(start_date),
+            week_start=min(start_week),
+            month_start=min(start_month),
+            year_start=min(start_year),
+            revenue=sum(money,na.rm = TRUE),
+            price=max(price),
+            discount_price=max(discount_price),
+            free_week=ifelse(min(freeweek)==1,'Yes','No'),
+            paid_passes=sum(freeweek==2),
+            pay_periods=passes) %>%
+        mutate(current_status=case_when(
+          current_status==0 ~ 'Undefined',
+          current_status==1 ~ 'Current',
+          current_status==3 ~ 'Payment Failed',
+          current_status==4 ~ 'Cancelled'
+        )) %>%
+#        group_by(!!rlang::sym(input$timedimensionOfoPass),pass_type,auto_renew,free_week,pay_periods,current_status) %>% 
+        group_by(!!rlang::sym(input$timedimensionOfoPass),pass_type) %>% 
+ 
+        summarise(passes=n(),
+            converted=sum(paid_passes>0),
+            users=n_distinct(user_id),
+            revenue=sum(revenue),
+            full_price=sum(price),
+            discounted_price=sum(discount_price)) %>%
+        rename(time_dimension=!!rlang::sym(input$timedimensionOfoPass)) 
+
+
+     return(ofoPass_data)
+      
+    })
+
+downloadOfoPassData <- reactive({
+      ofoPass_data<-ofo_Pass_Clean %>% 
+        group_by(Market,user_id, user_city,pass_type,auto_renew) %>% 
+        summarise(passes=n_distinct(create_time),
+            current_status=max(autorenew_status,na.rm=TRUE),
+            day_start=min(start_date),
+            week_start=min(start_week),
+            month_start=min(start_month),
+            year_start=min(start_year),
+            revenue=sum(money,na.rm = TRUE),
+            price=max(price),
+            discount_price=max(discount_price),
+            free_week=ifelse(min(freeweek)==1,'Yes','No'),
+            paid_passes=sum(freeweek==2),
+            pay_periods=passes) %>%
+        mutate(current_status=case_when(
+          current_status==0 ~ 'Undefined',
+          current_status==1 ~ 'Current',
+          current_status==3 ~ 'Payment Failed',
+          current_status==4 ~ 'Cancelled'
+        )) %>%
+        group_by(Market,!!rlang::sym(input$timedimensionOfoPass),pass_type) %>% 
+        summarise(passes=n(),
+            converted=sum(paid_passes>0),
+            users=n_distinct(user_id),
+            revenue=sum(revenue),
+            full_price=sum(price),
+            discounted_price=sum(discount_price)) %>%
+        rename(time_dimension=!!rlang::sym(input$timedimensionOfoPass)) 
+
+
+     return(ofoPass_data)
+      
+    })
+
+updateOfoPassConversion <- reactive({
+      ofoPass_data<-ofo_Pass_Clean %>% 
+       filter(grepl(input$citiesOfoPass,Market)) %>% 
+        group_by(user_id, user_city,pass_type,auto_renew) %>%
+        summarise(passes=n_distinct(create_time),
+            current_status=max(autorenew_status,na.rm=TRUE),
+            day_start=min(start_date),
+            week_start=min(start_week),
+            month_start=min(start_month),
+            year_start=min(start_year),
+            revenue=sum(money,na.rm = TRUE),
+            price=max(price),
+            discount_price=max(discount_price),
+            free_week=ifelse(min(freeweek)==1,'Yes','No'),
+            paid_passes=sum(freeweek==2),
+            pay_periods=passes) %>%
+  filter(auto_renew=='Yes'& free_week=='Yes') %>% 
+  group_by(!!rlang::sym(input$timedimensionOfoPass)) %>% 
+  summarise(passes=n(),
+            converted=sum(paid_passes>0),
+            non_converts=passes-converted,
+            conversion_rate=converted/passes) %>% 
+  rename(time_dimension=!!rlang::sym(input$timedimensionOfoPass)) 
+
+  return(ofoPass_data)
+      
+    })
+
+updateHeatmapData <- reactive({
+      trip_data<-US_trips_cleaned %>% 
+        filter(grepl(input$citiesHeatmap,Market))  %>% 
+        arrange(desc(trip_time)) %>% 
+        select(order_id,trip_time,startlat,startlng,trip_payment_type,coupon_name) %>% 
+        top_n(10000,trip_time) %>% 
+        filter(grepl(input$couponHeatmap,coupon_name) & grepl(input$triptypeHeatmap,trip_payment_type))
+
+     return(trip_data)
+    })
+```
+
+Top Line
+===================================== 
+
+Column 
+-------------------------------------
+
+### Downloads, Week to Date
+
+```{r}
+downloads_week <- getToplineValues('Downloads','WTD')
+valueBox(prettyNum(downloads_week,big.mark = ","), 
+         icon = "fa-download",
+         color = "#fae433")
+```
+
+### Downloads, Previous Week to Date
+
+```{r}
+downloads_week <- getToplineValues('Downloads','PWTD')
+valueBox(prettyNum(downloads_week,big.mark=","), 
+         icon = "fa-download",
+         color = "#fcee7e")
+```
+
+### Downloads, Previous Week 
+
+```{r}
+downloads_week <- getToplineValues('Downloads','PW')
+valueBox(prettyNum(downloads_week,big.mark=","), 
+         icon = "fa-download",
+         color = "#fef8c9")
+```
+
+### Last Updated
+
+```{r}
+last_timestamp <- computeLastUpdate()
+valueBox(last_timestamp, 
+         icon = "fa-calendar",
+         color = "#9ca09f")
+```
+
+Column 
+-------------------------------------
+### Trips, Week to Date
+
+```{r}
+trips_week <- getToplineValues('Trips','WTD')
+valueBox(prettyNum(trips_week,big.mark = ","), 
+         icon = "fa-bicycle",
+         color = "#fae433")
+```
+
+### Trips, Previous Week to Date
+
+```{r}
+trips_week <- getToplineValues('Trips','PWTD')
+valueBox(prettyNum(trips_week,big.mark=","), 
+         icon = "fa-bicycle",
+         color = "#fcee7e")
+         
+```
+
+### Trips, Previous Week
+
+```{r}
+trips_week <- getToplineValues('Trips','PW')
+valueBox(prettyNum(trips_week,big.mark=","), 
+         icon = "fa-bicycle",
+         color = "#fef8c9")         
+```
+
+Column 
+-------------------------------------
+
+### Revenue, Week to Date
+
+```{r}
+revenue_week <- getToplineValues('Revenue','WTD')
+valueBox(paste0("$",prettyNum(revenue_week,big.mark = ",")),
+         icon = "ion-cash",
+         color = "#fae433")         
+```
+
+
+### Revenue, Previous Week to Date
+
+```{r}
+revenue_week <- getToplineValues('Revenue','PWTD')
+valueBox(paste0("$",prettyNum(revenue_week,big.mark=",")), 
+         icon = "ion-cash",
+         color = "#fcee7e")
+         
+```
+
+
+### Revenue, Previous Week
+
+```{r}
+revenue_week <- getToplineValues('Revenue','PW')
+valueBox(paste0("$",prettyNum(revenue_week,big.mark=",")), 
+         icon = "ion-cash",
+         color = "#fef8c9")         
+         
+```
+
+Conversion Metrics
+===================================== 
+
+
+Sidebar {.sidebar}
+-------------------------------------
+
+```{r}
+selectInput("citiesConversion", label = "Choose your City:",
+            choices = c("*",sort(unique(US_Users_Summary_Clean$Market))), 
+            selected = c("*"),
+            multiple = FALSE)
+selectInput("timedimensionConversion",label="View reports by:",
+            choices=c("Month"="month_start",
+                      "Week"="week_start",
+                      "Year"="year_start",
+                        "Day"="day_start"),
+            selected = "week_start",
+            multiple = FALSE)
+
+downloadButton('downloadDataConversion', 'Download')
+
+downloadHandler(filename = function() { 
+    return('ConversionData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadUserData(), file)
+ })
+
+```
+
+<strong>Downloads</strong> - Number of times the app was downloaded
+
+<strong>Registrations</strong> - Number of users who downloaded who provided email and phone number
+
+<strong>First Trips</strong> - Number of registered users who have taken at least one ride
+
+<strong>Registration Conversion</strong> - Percentage of downloaders who have completed the registration process
+
+<strong>First Trip Conversion</strong> - Percentage of registered users who have taken at least one ride
+
+<strong>Same Day Conversion</strong> - Percentage of registered users who take their first trip the day they download
+
+<strong>Three Day Conversion</strong> - Percentage of registered users who take their first trip within three days of downloading
+
+Column {.tabset}
+-------------------------------------
+
+### Downloads
+
+```{r}
+
+ 
+
+ renderPlotly({
+  req(input$citiesConversion)
+  req(input$timedimensionConversion)
+  dat<-updatedUserData()
+  f1<-ggplot(dat,aes(x=time_dimension,y=downloads)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  ofo_fte_theme()+
+  scale_y_continuous(labels=scales::comma)+
+  scale_x_date()+
+  labs(title="Downloads over time", x="time", y="Number of Downloads") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0),
+           tooltip = c("x","y"))
+ # f1
+  })
+
+```
+
+### Registrations
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesConversion)
+  req(input$timedimensionConversion)
+  dat<-updatedUserData()
+  f1<-ggplot(dat,aes(x=time_dimension,y=registrations)) +
+#  geom_line()+
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  ofo_fte_theme()+
+  scale_y_continuous(labels=scales::comma)+
+  scale_x_date()+
+  labs(title="Registrations", x="time", y="Number of Registrations") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### First Trips
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesConversion)
+  req(input$timedimensionConversion)
+  dat<-updatedUserData()
+  f1<-ggplot(dat,aes(x=time_dimension,y=first_trip)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  ofo_fte_theme()+
+  scale_y_continuous(labels=scales::comma)+
+  scale_x_date()+
+  labs(title="First Trips", x="time", y="Number of First Trips") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Registration Conversion
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesConversion)
+  req(input$timedimensionConversion)
+  dat<-updatedUserData()
+  f1<-ggplot(dat,aes(x=time_dimension,y=overall_conversion,y_format=scales::percent(overall_conversion))) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  ofo_fte_theme()+
+  scale_y_continuous(labels=scales::percent)+
+  scale_x_date()+
+  labs(title="Downloads to Registration conversion", x="time", y="Conversion Rate") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0),
+           tooltip = c("x","y_format"))
+ # f1
+  })
+
+```
+
+### First Trip Conversion
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesConversion)
+  req(input$timedimensionConversion)
+  dat<-updatedUserData()
+  f1<-ggplot(dat,aes(x=time_dimension,y=ride_conversion)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  ofo_fte_theme()+
+  scale_y_continuous(labels=scales::percent)+
+  scale_x_date()+
+  labs(title="First trip conversion", x="time", y="Conversion Rate") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Same Day Conversion
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesConversion)
+  req(input$timedimensionConversion)
+  dat<-updatedUserData()
+  f1<-ggplot(dat,aes(x=time_dimension,y=same_day_conversion)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  ofo_fte_theme()+
+  scale_y_continuous(labels=scales::percent)+
+  scale_x_date()+
+  labs(title="Same day conversion", x="time", y="Conversion Rate") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Three Day Conversion
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesConversion)
+  req(input$timedimensionConversion)
+  dat<-updatedUserData()
+  f1<-ggplot(dat,aes(x=time_dimension,y=three_day_conversion)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  ofo_fte_theme()+
+  scale_y_continuous(labels=scales::percent)+
+  scale_x_date()+
+  labs(title="First Ride within Three Days", x="time", y="Conversion Rate") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+Retention metrics
+===================================== 
+
+Sidebar {.sidebar}
+-------------------------------------
+
+```{r}
+
+selectInput("citiesRetention", label = "Choose Your City:",
+            choices = c("*",sort(unique(US_trips_cleaned$Market))), 
+            selected = c("*"),
+            multiple = FALSE)
+selectInput("timedimensionRetention",label="View reports by:",
+            choices=c("Month"="month_start",
+                      "Week"="week_start",
+                      "Year"="year_start",
+                        "Day"="day_start"),
+            selected = "week_start",
+            multiple = FALSE)
+```
+To download data related to Join Cohorts, click here:
+```{r}
+downloadButton('downloadDataRetention', 'Download Cohort Data')
+
+downloadHandler(filename = function() { 
+    return('RetentionData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadRetentionData(), file)
+ })
+```
+
+To download data related to Trip Distribution, click here:
+
+```{r}
+
+downloadButton('downloadDataRetention', 'Download Trip Data')
+
+downloadHandler(filename = function() { 
+    return('RetentionData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadRetentionTripsData(), file)
+ })
+```
+
+<strong>Cohort Survival (Percentage) </strong> - A view of percentage of active users (at least one trip) in each successive time period from their download date
+
+<strong>Cohort Survival (Counts) </strong> - A view of counts of active users (at least one trip) in each successive time period from their download date
+
+Column {.tabset}
+-------------------------------------
+
+### Cohort Survival (Percentage)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesRetention)
+  req(input$timedimensionRetention)
+  dat<-updateRetentionData()
+  f1<-ggplot(dat,aes(x=my_x_axis, y=cohort_conversion)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  facet_wrap(vars(time_dimension))+
+  scale_x_continuous(labels=comma,limits=c(NA,13))+
+  scale_y_continuous(labels=percent)+
+  ofo_fte_theme() +
+  labs(title="Ofo US User Survival Curve", x="Weeks Since Registration", y="Percent still riding") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+  layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Cohort Survival (Counts)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesRetention)
+  req(input$timedimensionRetention)
+  dat<-updateRetentionData()
+  f1<-ggplot(dat,aes(x=my_x_axis, y=riders)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  facet_wrap(vars(time_dimension))+
+  scale_x_continuous(labels=comma,limits=c(NA,13))+
+  scale_y_continuous(labels=comma)+
+  ofo_fte_theme() +
+  labs(title="Ofo US User Survival Curve", x="Weeks Since Registration", y="Users taking at least one ride") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+  
+ggplotly(f1) %>% 
+  layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+  
+  
+### Rider Total Trip Distribution (Percentage)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesRetention)
+  req(input$timedimensionRetention)
+  dat<-updateRetentionTripsData()
+  f1<-ggplot(dat,aes(x=total_trips, y=percent_riders)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  facet_wrap(vars(time_dimension))+
+  scale_x_continuous(labels=comma,limits=c(NA,20))+
+  scale_y_continuous(labels=percent)+
+  ofo_fte_theme() +
+  labs(title="Ofo US Rider Trip Distribution", x="Total Trips", y="Share of Riders") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+  
+ggplotly(f1) %>% 
+  layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+   
+### Rider Total Trip Distribution (Counts)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesRetention)
+  req(input$timedimensionRetention)
+  dat<-updateRetentionTripsData()
+  f1<-ggplot(dat,aes(x=total_trips, y=riders)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  facet_wrap(vars(time_dimension))+
+  scale_x_continuous(labels=comma,limits=c(NA,20))+
+  scale_y_continuous(labels=comma)+
+  ofo_fte_theme() +
+  labs(title="Ofo US Rider Trip Distribution", x="Total Trips", y="Count of Riders") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+  
+ggplotly(f1) %>% 
+  layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```    
+
+Usage metrics
+===================================== 
+
+Sidebar {.sidebar}
+-------------------------------------
+
+```{r}
+
+selectInput("citiesUsage", label = "Choose Your City:",
+            choices = c("*",sort(unique(US_trips_cleaned$Market))), 
+            selected = c("*"),
+            multiple = FALSE)
+selectInput("timedimensionUsage",label="View reports by:",
+            choices=c("Month"="trip_month",
+                      "Week"="trip_week",
+                      "Year"="trip_year",
+                        "Day"="trip_date"),
+            selected = "trip_week",
+            multiple = FALSE)
+
+```
+
+To download data related to Active Users, click here:
+```{r}
+downloadButton('downloadDataActiveUser', 'Download User Data')
+
+downloadHandler(filename = function() { 
+    return('ActiveUserData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadActiveUserData(), file)
+ })
+```
+
+To download data related to Trip Type, click here:
+
+```{r}
+
+downloadButton('downloadDataTrip', 'Download Trip Type Data')
+
+downloadHandler(filename = function() { 
+    return('TripTypeData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadRetentionTripsData(), file)
+ })
+```
+
+To download data related to Recency Segments, click here:
+
+```{r}
+
+downloadButton('downloadRecencyData', 'Download Recency Segment Data')
+
+downloadHandler(filename = function() { 
+    return('RecencySegmentData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadTripRecencyData(), file)
+ })
+```
+
+<strong>Trips by Trip Type (Count)</strong> - Number of trips per time period by type of trip 
+
+<strong>Trips by Trip Type (Share)</strong> - Percentage of total trips per time period by type of trip 
+
+
+Column {.tabset}
+-------------------------------------
+
+### Active Users (Count)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesUsage)
+  req(input$timedimensionUsage)
+  dat<-updateActiveUserData()
+  f1<-ggplot(dat,aes(x=time_dimension, y=users, fill=segment)) + 
+  geom_bar(stat="identity")+
+  scale_x_date()+
+  scale_y_continuous(labels=comma)+
+  scale_fill_manual(values=ofo_color_palette(3,4)) + 
+#  scale_color_manual(values=c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A")) + 
+  ofo_fte_theme() +
+  labs(title="Active vs. Inactive Users", x="Date", y="Total Users") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+  layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+-------------------------------------
+
+### Trips by Trip Type (Count)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesUsage)
+  req(input$timedimensionUsage)
+  dat<-updateTripData()
+  f1<-ggplot(dat,aes(x=time_dimension, y=trips, fill=trip_payment_type)) + 
+  geom_bar(stat="identity")+
+  scale_x_date()+
+  scale_y_continuous(labels=comma)+
+  scale_fill_manual(values=ofo_color_palette(3,4)) + 
+#  scale_color_manual(values=c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A")) + 
+  ofo_fte_theme() +
+  labs(title="Trips by Trip Type", x="Date", y="Number of Trips") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Trips by Trip Type (Share)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesUsage)
+  req(input$timedimensionUsage)
+  dat<-updateTripData()
+  f1<-ggplot(dat,aes(x=time_dimension, y=trip_share, fill=trip_payment_type)) + 
+  geom_bar(stat="identity")+
+  scale_x_date()+
+  scale_y_continuous(labels=percent)+
+  scale_fill_manual(values=ofo_color_palette(3,4)) + 
+#  scale_color_manual(values=c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A")) + 
+  ofo_fte_theme() +
+  labs(title="Trips by Trip Type", x="Date", y="Number of Trips") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Trips by Recency Segment  (Count)
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesUsage)
+  req(input$timedimensionUsage)
+  dat<-updateTripRecencyData()
+  f1<-ggplot(dat,aes(x=time_dimension, y=trips, fill=trip_type)) + 
+  geom_bar(stat="identity")+
+  scale_x_date()+
+  scale_y_continuous(labels=comma)+
+  scale_fill_manual(values=ofo_color_palette(3,5)) + 
+#  scale_color_manual(values=c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A")) + 
+  ofo_fte_theme() +
+  labs(title="Trips by Trip Type", x="Date", y="Number of Trips") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+Revenue metrics
+===================================== 
+
+Sidebar {.sidebar}
+-------------------------------------
+
+```{r}
+
+selectInput("citiesRevenue", label = "Choose Your City:",
+            choices = c("*",sort(unique(US_trips_cleaned$Market))), 
+            selected = c("*"),
+            multiple = FALSE)
+selectInput("timedimensionRevenue",label="View reports by:",
+            choices=c("Month"="trip_month",
+                      "Week"="trip_week",
+                      "Year"="trip_year",
+                      "Day"="trip_date"),
+            selected = "trip_week",
+            multiple = FALSE)
+
+```
+
+To download data related to Revenue, click here:
+```{r}
+downloadButton('downloadRevenue', 'Download Revenue Data')
+
+downloadHandler(filename = function() { 
+    return('RevenueData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadRevenueData(), file)
+ })
+```
+
+To download data related to coupon usage, click here:
+
+```{r}
+
+downloadButton('downloadCoupo', 'Download Coupon Data')
+
+downloadHandler(filename = function() { 
+    return('CouponData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadCouponData(), file)
+ })
+```
+
+<strong>Revenue by Trip Type</strong> - Trip revenue by payment method
+
+
+Column {.tabset}
+-------------------------------------
+
+### Revenue by Trip Type
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesRevenue)
+  req(input$timedimensionRevenue)
+  dat<-updateRevenueData()
+  f1<-ggplot(dat,aes(x=time_dimension, y=revenue, fill=payment_type)) + 
+  geom_bar(stat="identity")+
+  scale_x_date()+
+  scale_y_continuous(labels=dollar)+
+  scale_fill_manual(values=ofo_color_palette(3,4)) + 
+#  scale_color_manual(values=c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A")) + 
+  ofo_fte_theme() +
+  labs(title="Revenue by Trip Type", x="Date", y="Revenue") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Coupon Usage - Trips 
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesRevenue)
+  req(input$timedimensionRevenue)
+  dat<-updateCouponData()
+  f1<-ggplot(dat, aes(x=coupon_name,y=coupons_used,fill=trip_type)) +
+  geom_bar(stat="identity",colour='black',size=.1)+
+  coord_flip() + 
+  ggtitle("Coupons redeemed for Trips (coupon count)") + 
+  ofo_fte_theme() +
+  scale_fill_manual(values=ofo_color_palette(3,5)) + 
+  labs(title="Top Coupons Used", x="", y="Coupons") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Coupon Usage - Riders 
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesRevenue)
+  req(input$timedimensionRevenue)
+  dat<-updateCouponData()
+  f1<-ggplot(dat, aes(x=coupon_name,y=unique_users)) +
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  coord_flip() + 
+  ggtitle("Coupons redeemed for Trips (coupon count)") + 
+  ofo_fte_theme() +
+  labs(title="Top Coupons Used", x="", y="Riders") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+ofoPass metrics
+===================================== 
+
+Sidebar {.sidebar}
+-------------------------------------
+
+```{r}
+
+selectInput("citiesOfoPass", label = "Choose Your City:",
+            choices = c("*",sort(unique(US_trips_cleaned$Market))), 
+            selected = c("*"),
+            multiple = FALSE)
+selectInput("timedimensionOfoPass",label="View reports by:",
+            choices=c("Month"="month_start",
+                      "Week"="week_start",
+                      "Year"="year_start",
+                      "Day"="day_start"),
+            selected = "week_start",
+            multiple = FALSE)
+
+```
+
+To download data related to ofo Pass, click here:
+```{r}
+downloadButton('downloadofoPass', 'Download ofoPass Data')
+
+downloadHandler(filename = function() { 
+    return('ofoPassData.csv')
+
+ }, content = function(file) {
+   write.csv(downloadOfoPassData(), file)
+ })
+```
+
+
+<strong>Pass Purchases by Pass Type</strong> - ofo Passes purchased during the time frame by type of pass
+
+<strong>Pass Revenue by Pass Type</strong> - Revenue received during the time frame by type of pass purchased
+
+Column {.tabset}
+-------------------------------------
+
+### Pass Purchases by Pass Type
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesOfoPass)
+  req(input$timedimensionOfoPass)
+  dat<-updateOfoPassData()
+  f1<-ggplot(dat,aes(x=time_dimension, y=passes, fill=pass_type)) + 
+  geom_bar(stat="identity")+
+  scale_x_date()+
+  scale_y_continuous(labels=comma)+
+  scale_fill_manual(values=ofo_color_palette(3,7)) + 
+#  scale_color_manual(values=c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A")) + 
+  ofo_fte_theme() +
+  labs(title="Passes Sold by Pass Type", x="Date", y="Passes") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Pass Revenue by Pass Type
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesOfoPass)
+  req(input$timedimensionOfoPass)
+  dat<-updateOfoPassData()
+  f1<-ggplot(dat,aes(x=time_dimension, y=revenue, fill=pass_type)) + 
+  geom_bar(stat="identity")+
+  scale_x_date()+
+  scale_y_continuous(labels=dollar)+
+  scale_fill_manual(values=ofo_color_palette(3,7)) + 
+#  scale_color_manual(values=c("#FCEE7E","#FDDA24","#F3A32D","#3F3B3A")) + 
+  ofo_fte_theme() +
+  labs(title="Revenue by Pass Type", x="Date", y="Passes") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+  layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+### Free Week to Paid Pass Conversion
+
+```{r}
+
+ renderPlotly({
+  req(input$citiesOfoPass)
+  req(input$timedimensionOfoPass)
+  dat<-updateOfoPassConversion()
+  f1<-ggplot(dat,aes(x=time_dimension, y=conversion_rate)) + 
+  geom_bar(stat="identity", fill='#FCEE7E',colour='black',size=.1)+
+  scale_x_date()+
+  scale_y_continuous(labels=percent)+
+  ofo_fte_theme() +
+  labs(title="Free Pass Conversion", x="Date", y="Conversion Rate") +
+  theme(legend.title=element_blank(),legend.text=element_text(size=5),legend.position='bottom')
+ggplotly(f1) %>% 
+    layout(legend = list(orientation = "h",y=0))
+ # f1
+  })
+
+```
+
+
+Heatmap
+===================================== 
+
+Sidebar {.sidebar}
+-------------------------------------
+
+```{r}
+
+selectInput("citiesHeatmap", label = "Choose Your City:",
+            choices = sort(unique(US_trips_cleaned$Market)), 
+            selected = c("Miami"),
+            multiple = FALSE)
+selectInput("triptypeHeatmap",label="Filter for trip type:",
+            choices=c("*",sort(unique(US_trips_cleaned$trip_payment_type))),
+            selected = "*",
+            multiple = FALSE)
+selectizeInput("couponHeatmap",label="Filter for coupon:",
+               choices=c("*",sort(unique(US_trips_cleaned$coupon_name))),
+               selected="*")
+
+downloadButton('downloadDataOfoPass', 'Download')
+
+downloadHandler(filename = function() { 
+    return('ofoPassData.csv')
+
+ }, content = function(file) {
+   write.csv(updateOfoPassData(), file)
+ })
+```
+
+
+Column {.tabset}
+-------------------------------------
+
+### Recent Trips
+
+```{r}
+
+output$myMap <- renderLeaflet({
+  #now build the map!
+  ofomap<-updateHeatmapData() %>% 
+    leaflet() %>% 
+    addProviderTiles("CartoDB.Positron") %>%
+    setView(lng = -90, lat = 40, zoom = 5) %>% 
+    clearShapes() %>%
+    clearControls() %>% 
+    addWebGLHeatmap(lng=~startlng, lat=~startlat, size = 25, units = 'm')  
+  ofomap
+})
+  
+leafletOutput('myMap')
+```
+
+```
